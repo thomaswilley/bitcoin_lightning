@@ -1,0 +1,88 @@
+services:
+  bitcoin:
+    container_name: bitcoin-node
+    image: my-bitcoin-core
+    env_file:
+      - .env
+    volumes:
+      - /mnt/nvme1/bitcoin/data:/root/.bitcoin
+    networks:
+      - lightning-net
+    ports:
+      - "8333:8333"
+
+  lnd:
+    container_name: lnd
+    image: lightninglabs/lnd:v0.18.5-beta
+    env_file:
+      - .env
+    command:
+      - "--bitcoin.mainnet"
+      - "--bitcoin.node=bitcoind"
+      - "--bitcoind.rpchost=bitcoin-node:8332"
+      - "--bitcoind.rpcuser=${RPC_USER:-btc_user}"
+      - "--bitcoind.rpcpass=${RPC_PASS:-btc_user_password}"
+      - "--bitcoind.zmqpubrawblock=tcp://bitcoin-node:28332"
+      - "--bitcoind.zmqpubrawtx=tcp://bitcoin-node:28333"
+      - "--rpclisten=0.0.0.0:10009"
+      - "--restlisten=0.0.0.0:8080"
+    volumes:
+      - /mnt/nvme1/bitcoin/lightning/data:/root/.lnd
+    networks:
+      - lightning-net
+    ports:
+      - "9735:9735"
+    depends_on:
+      - bitcoin
+
+  redis:
+    container_name: redis
+    env_file:
+      - .env
+    image: redis:latest
+    command: ["redis-server", "--requirepass", "${RPC_PASS}", "--appendonly", "yes"]
+    networks:
+      - lightning-net
+    volumes:
+      - redis-data:/data
+
+  lndhub:
+    container_name: lndhub
+    build:
+      context: ./LndHub
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - LNDHUB_LND_GRPC=lnd:10009
+      - LNDHUB_LND_REST=lnd:8080
+      - LNDHUB_ADMIN_MACAROON_FILE=/lnd-data/data/chain/bitcoin/mainnet/admin.macaroon
+      - LNDHUB_CERT_FILE=/lnd-data/tls.cert
+      # Provide full config as JSON if you wish to override defaults.
+      - CONFIG={"bitcoind":{"rpc":"http://$RPC_USER:$RPC_PASS@bitcoin-node:8332/wallet/default"},"redis":{"host":"redis","port":6379,"family":4,"password":"$RPC_PASS","db":0},"lnd":{"url":"lnd:10009","password":"$LND_WALLET_PASS"}}
+    volumes:
+      - /mnt/nvme1/bitcoin/lightning/data:/lnd-data:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - lightning-net
+    depends_on:
+      - lnd
+      - redis
+    command: >
+      sh -c '
+        echo "Waiting for LND TLS and macaroon files ($$LNDHUB_CERT_FILE and $$LNDHUB_ADMIN_MACAROON_FILE)...";
+        while [ ! -f "$$LNDHUB_CERT_FILE" ] || [ ! -f "$$LNDHUB_ADMIN_MACAROON_FILE" ]; do
+          echo "Waiting for files..."; sleep 5;
+        done;
+        echo "Files found, copying...";
+        cp "$$LNDHUB_CERT_FILE" /lndhub/ && cp "$$LNDHUB_ADMIN_MACAROON_FILE" /lndhub/;
+        cd /lndhub && npm start
+      '
+
+networks:
+  lightning-net:
+    driver: bridge
+
+volumes:
+  redis-data:
